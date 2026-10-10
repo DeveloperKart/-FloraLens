@@ -1,516 +1,396 @@
 
-"use strict";
+const MODEL_URL = "https://teachablemachine.withgoogle.com/models/mIiK1Xitk/";
 
-/* =========================================
-   FLORALENS — PLANT SCANNER
-   ========================================= */
-
-const MODEL_URL =
-    "https://teachablemachine.withgoogle.com/models/mIiK1Xitk/";
-
-// Scanner settings
 const CONFIDENCE_THRESHOLD = 0.85;
 const REQUIRED_STABLE_FRAMES = 5;
 const CAMERA_WIDTH = 400;
 const CAMERA_HEIGHT = 400;
 
-// Voice is enabled by default
-let voiceEnabled = true;
-
-// Teachable Machine objects
-let model = null;
-let webcam = null;
-
-// Scanner state
-let isRunning = false;
-let isStarting = false;
-let animationFrameId = null;
-let stableLabel = "";
-let stableFrameCount = 0;
-let lastDisplayedLabel = "";
-let lastSpokenLabel = "";
-
-/* =========================================
-   HTML ELEMENTS
-   ========================================= */
-
-const cameraElement = document.getElementById("camera");
-const statusElement = document.getElementById("status");
-const resultElement = document.getElementById("result");
-const detailsElement = document.getElementById("details");
-const predictionsElement = document.getElementById("predictions");
-const confidenceInfoElement =
-    document.getElementById("confidenceInfo");
-
-const startButton = document.getElementById("startBtn");
-const stopButton = document.getElementById("stopBtn");
-const voiceButton = document.getElementById("voiceBtn");
-
-/* =========================================
-   PLANT INFORMATION DATABASE
-   ========================================= */
-
+// Plant and weed information
 const classInfo = {
-    "tulsi": {
+    tulsi: {
         name: "Tulsi",
         type: "Medicinal Plant",
-        description: [
+        benefits: [
             "Benefit 1: Tulsi leaves are traditionally used in herbal preparations for coughs and colds, although evidence for treating these conditions is limited.",
             "Benefit 2: Tulsi contains plant compounds with antioxidant activity demonstrated in laboratory studies."
         ]
     },
 
-    "bryophyllum pinnatum": {
+    bryophyllumpinnatum: {
         name: "Bryophyllum pinnatum",
         type: "Medicinal Plant",
-        description: [
+        benefits: [
             "Benefit 1: It is grown as an ornamental succulent and can be propagated using plantlets along its leaf margins.",
             "Benefit 2: It is studied by researchers for potentially useful plant compounds, including antioxidant activity; its medicinal effectiveness in humans is not well established."
         ]
     },
 
-    "aloe vera": {
+    aloevera: {
         name: "Aloe Vera",
         type: "Medicinal Plant",
-        description: [
+        benefits: [
             "Benefit 1: Aloe vera gel can help soothe and moisturize dry skin.",
             "Benefit 2: Certain aloe vera gel products may help soothe minor skin irritation and burns, although evidence varies by use and product."
         ]
     },
 
-    "crabgrass": {
-        name: "Crabgrass",
-        type: "Weed",
-        description: [
-            "Crabgrass is a common grass weed that grows in lawns, gardens, fields, and along roadsides. It grows quickly and can compete with nearby plants for nutrients, water, light, and space."
+    crabgrass: {
+        name: "Crab Grass",
+        type: "Common Weed",
+        benefits: [
+            "Crab grass is a common grass weed found in lawns, gardens, fields, and along roadsides.",
+            "It grows quickly and can compete with nearby plants for water, nutrients, sunlight, and space."
         ]
     },
 
-    "background / noise": {
+    backgroundnoise: {
         name: "Background / Noise",
-        type: "Background",
-        description: []
+        type: "Unrecognized Object",
+        benefits: []
     }
 };
 
-/* =========================================
-   LABEL NORMALIZATION
-   FIXES:
-   Tulsi (Medicinal Plant) -> tulsi
-   Aloe Vera (Medicinal Plant) -> aloe vera
-   Crabgrass (Weed) -> crabgrass
-   ========================================= */
+// Elements from scanner.html
+const camera = document.getElementById("camera");
+const statusElement = document.getElementById("status");
+const resultElement = document.getElementById("result");
+const detailsElement = document.getElementById("details");
+const predictionsElement = document.getElementById("predictions");
+const confidenceInfo = document.getElementById("confidenceInfo");
 
+const startBtn = document.getElementById("startBtn");
+const stopBtn = document.getElementById("stopBtn");
+const voiceBtn = document.getElementById("voiceBtn");
+
+let model = null;
+let webcam = null;
+let animationFrame = null;
+let isRunning = false;
+let isLoading = false;
+
+let voiceEnabled = true;
+let stableLabel = "";
+let stableFrames = 0;
+let lastDisplayedLabel = "";
+let lastSpokenLabel = "";
+let lastSpokenTime = 0;
+
+// Convert model labels into comparable keys.
+// Example: "Crab Grass (Weed)" -> "crabgrass"
 function normaliseLabel(label) {
     return String(label || "")
         .toLowerCase()
         .trim()
-
-        // Remove category information inside parentheses
         .replace(/\s*\([^)]*\)/g, "")
-
-        // Normalize spacing
-        .replace(/\s+/g, " ")
-        .trim();
+        .replace(/[^a-z0-9]/g, "");
 }
 
-function makeLabelKey(label) {
-    return normaliseLabel(label)
-        .replace(/[_-]+/g, " ")
-        .replace(/\s+/g, " ")
-        .trim();
-}
-
+// Match Teachable Machine labels to our information database.
 function getClassInfo(label) {
-    const key = makeLabelKey(label);
+    const key = normaliseLabel(label);
 
     const aliases = {
-        "holy basil": "tulsi",
-        "ocimum tenuiflorum": "tulsi",
-        "ocimum sanctum": "tulsi",
+        tulsi: "tulsi",
+        holybasil: "tulsi",
 
-        "bryophyllum": "bryophyllum pinnatum",
-        "brophyllum pinnatum": "bryophyllum pinnatum",
-        "brophyllum": "bryophyllum pinnatum",
-        "kalanchoe pinnata": "bryophyllum pinnatum",
+        bryophyllum: "bryophyllumpinnatum",
+        bryophyllumpinnatum: "bryophyllumpinnatum",
+        brophyllumpinnatum: "bryophyllumpinnatum",
 
-        "aloe": "aloe vera",
-        "crabgrass weed": "crabgrass",
+        aloe: "aloevera",
+        aloevera: "aloevera",
 
-        "background": "background / noise",
-        "background noise": "background / noise",
-        "noise": "background / noise",
-        "background/noise": "background / noise"
+        crabgrass: "crabgrass",
+
+        background: "backgroundnoise",
+        backgroundnoise: "backgroundnoise",
+        noise: "backgroundnoise"
     };
 
-    const databaseKey = aliases[key] || key;
-    const info = classInfo[databaseKey] || null;
-
-    console.log("FloraLens class matching:", {
-        receivedLabel: label,
-        normalizedKey: key,
-        databaseKey: databaseKey,
-        matched: Boolean(info)
-    });
-
-    return info;
+    const matchedKey = aliases[key] || key;
+    return classInfo[matchedKey] || null;
 }
 
-/* =========================================
-   SAFE TEXT DISPLAY
-   ========================================= */
-
+// Update the page status safely.
 function setStatus(message) {
     if (statusElement) {
         statusElement.textContent = message;
     }
 }
 
+// Update the voice button.
+function updateVoiceButton() {
+    if (!voiceBtn) return;
+
+    voiceBtn.textContent = voiceEnabled
+        ? "Voice: ON"
+        : "Voice: OFF";
+
+    voiceBtn.setAttribute(
+        "aria-pressed",
+        String(voiceEnabled)
+    );
+}
+
+// Stop any ongoing speech.
+function stopSpeech() {
+    if ("speechSynthesis" in window) {
+        window.speechSynthesis.cancel();
+    }
+}
+
+// Read the recognized plant or weed information.
+function speakResult(info, labelKey) {
+    if (!voiceEnabled || !("speechSynthesis" in window)) {
+        return;
+    }
+
+    const now = Date.now();
+
+    // Avoid repeatedly announcing the same result.
+    if (
+        labelKey === lastSpokenLabel &&
+        now - lastSpokenTime < 10000
+    ) {
+        return;
+    }
+
+    stopSpeech();
+
+    const message = info.name === "Background / Noise"
+        ? "No supported plant or weed recognized."
+        : `${info.name}. ${info.type}. ${info.benefits.join(" ")}`;
+
+    const utterance = new SpeechSynthesisUtterance(message);
+    utterance.lang = "en-IN";
+    utterance.rate = 0.95;
+    utterance.pitch = 1;
+
+    lastSpokenLabel = labelKey;
+    lastSpokenTime = now;
+
+    window.speechSynthesis.speak(utterance);
+}
+
+// Display the final recognized result.
 function displayResult(label, confidence) {
     const info = getClassInfo(label);
 
     if (!info) {
+        console.warn("No information found for model class:", label);
+
         if (resultElement) {
             resultElement.textContent = label;
         }
 
         if (detailsElement) {
             detailsElement.textContent =
-                "Plant information is not configured for this class: " +
-                label +
-                ". Check the browser console.";
+                "Information for this class has not been configured.";
         }
 
-        console.warn(
-            "FloraLens: Missing class information for:",
-            label
-        );
-
+        lastDisplayedLabel = "";
         return;
     }
+
+    const labelKey = normaliseLabel(info.name);
 
     if (resultElement) {
         resultElement.textContent = info.name;
     }
 
-    if (!detailsElement) {
-        return;
+    if (detailsElement) {
+        if (info.name === "Background / Noise") {
+            detailsElement.textContent =
+                "Benefits will appear here if any medicinal plant is recognized.";
+        } else {
+            detailsElement.textContent =
+                `${info.type}\n\n${info.benefits.join("\n\n")}`;
+        }
     }
 
-    detailsElement.replaceChildren();
-
-    if (info.type === "Background") {
-        detailsElement.textContent =
-            "Benefits will appear here if any medicinal plant is recognized.";
-        return;
+    if (confidenceInfo) {
+        confidenceInfo.textContent =
+            `Confidence: ${(confidence * 100).toFixed(1)}%`;
     }
 
-    const typeElement = document.createElement("p");
-    typeElement.textContent = info.type;
-    typeElement.style.fontWeight = "700";
-    typeElement.style.color = "#278454";
-
-    detailsElement.appendChild(typeElement);
-
-    for (const description of info.description) {
-        const paragraph = document.createElement("p");
-        paragraph.textContent = description;
-        detailsElement.appendChild(paragraph);
-    }
-
-    if (typeof confidence === "number") {
-        const confidenceElement = document.createElement("p");
-
-        confidenceElement.textContent =
-            "AI confidence: " + (confidence * 100).toFixed(1) + "%";
-
-        confidenceElement.style.fontSize = "12px";
-        confidenceElement.style.color = "#758277";
-
-        detailsElement.appendChild(confidenceElement);
+    // Announce only when the recognized class changes.
+    if (labelKey !== lastDisplayedLabel) {
+        lastDisplayedLabel = labelKey;
+        speakResult(info, labelKey);
     }
 }
 
-/* =========================================
-   VOICE ASSISTANT
-   Speaks the plant name and its information
-   ========================================= */
-
-function getVoiceMessage(label) {
-    const info = getClassInfo(label);
-
-    if (!info) {
-        return "FloraLens could not find information for this class.";
-    }
-
-    if (info.type === "Background") {
-        return "No medicinal plant has been recognized. " +
-            "Benefits will appear here if any medicinal plant is recognized.";
-    }
-
-    return (
-        "FloraLens has identified it as " +
-        info.name +
-        ". " +
-        info.description.join(" ")
-    );
-}
-
-function speakResult(label) {
-    if (!voiceEnabled) {
-        return;
-    }
-
-    if (!("speechSynthesis" in window)) {
-        console.warn("Speech synthesis is not supported in this browser.");
-        return;
-    }
-
-    const info = getClassInfo(label);
-
-    if (!info) {
-        return;
-    }
-
-    const normalized = makeLabelKey(label);
-
-    // Do not announce the same detection repeatedly
-    if (normalized === lastSpokenLabel) {
-        return;
-    }
-
-    lastSpokenLabel = normalized;
-
-    window.speechSynthesis.cancel();
-
-    const speech = new SpeechSynthesisUtterance(
-        getVoiceMessage(label)
-    );
-
-    speech.lang = "en-IN";
-    speech.rate = 0.9;
-    speech.pitch = 1;
-
-    window.speechSynthesis.speak(speech);
-}
-
-function updateVoiceButton() {
-    if (!voiceButton) {
-        return;
-    }
-
-    voiceButton.textContent = voiceEnabled
-        ? "Voice: ON"
-        : "Voice: OFF";
-
-    voiceButton.setAttribute(
-        "aria-pressed",
-        String(voiceEnabled)
-    );
-}
-
-/* =========================================
-   CONFIDENCE BARS
-   ========================================= */
-
+// Display model predictions and confidence bars.
 function updatePredictions(predictions) {
-    if (!predictionsElement) {
-        return;
-    }
+    if (!predictionsElement) return;
 
-    predictionsElement.replaceChildren();
+    predictionsElement.innerHTML = "";
 
-    const sortedPredictions = [...predictions].sort(
-        (a, b) => b.probability - a.probability
-    );
-
-    for (const prediction of sortedPredictions) {
-        const percentage = prediction.probability * 100;
+    predictions.forEach((prediction) => {
+        const percentage = Math.max(
+            0,
+            Math.min(100, prediction.probability * 100)
+        );
 
         const row = document.createElement("div");
-        row.className = "prediction";
+        row.className = "prediction-row";
 
-        const label = document.createElement("div");
-
-        label.style.display = "flex";
-        label.style.justifyContent = "space-between";
-        label.style.gap = "12px";
+        const heading = document.createElement("div");
+        heading.className = "prediction-heading";
 
         const name = document.createElement("span");
         name.textContent = prediction.className;
 
         const score = document.createElement("span");
-        score.textContent = percentage.toFixed(1) + "%";
+        score.textContent = `${percentage.toFixed(1)}%`;
 
-        label.append(name, score);
+        heading.appendChild(name);
+        heading.appendChild(score);
+
+        const track = document.createElement("div");
+        track.className = "confidence-track";
 
         const bar = document.createElement("div");
-        bar.className = "bar";
-        bar.setAttribute("role", "progressbar");
-        bar.setAttribute("aria-valuemin", "0");
-        bar.setAttribute("aria-valuemax", "100");
-        bar.setAttribute(
-            "aria-valuenow",
-            percentage.toFixed(1)
-        );
-        bar.setAttribute(
-            "aria-label",
-            prediction.className + " confidence"
-        );
+        bar.className = "confidence-bar";
+        bar.style.width = `${percentage}%`;
 
-        const fill = document.createElement("div");
-        fill.className = "fill";
-        fill.style.width = percentage + "%";
+        track.appendChild(bar);
+        row.appendChild(heading);
+        row.appendChild(track);
 
-        bar.appendChild(fill);
-        row.append(label, bar);
         predictionsElement.appendChild(row);
-    }
-
-    if (confidenceInfoElement) {
-        confidenceInfoElement.textContent =
-            "Recognition threshold: " +
-            (CONFIDENCE_THRESHOLD * 100) +
-            "%. The scanner waits for " +
-            REQUIRED_STABLE_FRAMES +
-            " consecutive stable frames.";
-    }
+    });
 }
 
-/* =========================================
-   STABLE-FRAME RECOGNITION
-   ========================================= */
-
-function resetStableDetection() {
-    stableLabel = "";
-    stableFrameCount = 0;
-}
-
-function processPredictions(predictions) {
-    updatePredictions(predictions);
-
-    if (!predictions || predictions.length === 0) {
-        resetStableDetection();
-        return;
-    }
-
-    const bestPrediction = predictions.reduce(
-        (best, current) =>
-            current.probability > best.probability
-                ? current
-                : best
-    );
-
-    const label = bestPrediction.className;
-    const confidence = bestPrediction.probability;
-    const normalized = makeLabelKey(label);
-
-    if (confidence < CONFIDENCE_THRESHOLD) {
-        resetStableDetection();
-
-        setStatus(
-            "Looking for a clear plant image... Best match: " +
-            label +
-            " (" +
-            (confidence * 100).toFixed(1) +
-            "%)."
-        );
-
-        return;
-    }
-
-    if (normalized === stableLabel) {
-        stableFrameCount++;
-    } else {
-        stableLabel = normalized;
-        stableFrameCount = 1;
-    }
-
-    if (stableFrameCount < REQUIRED_STABLE_FRAMES) {
-        setStatus(
-            "Checking recognition stability... " +
-            stableFrameCount +
-            "/" +
-            REQUIRED_STABLE_FRAMES
-        );
-
-        return;
-    }
-
-    setStatus(
-        "Recognition complete: " +
-        label +
-        " (" +
-        (confidence * 100).toFixed(1) +
-        "%)."
-    );
-
-    // Only update and speak when the detected class changes.
-    if (normalized !== lastDisplayedLabel) {
-        lastDisplayedLabel = normalized;
-
-        displayResult(label, confidence);
-        speakResult(label);
-    }
-}
-
-/* =========================================
-   MODEL LOADING
-   ========================================= */
-
-async function loadModel() {
-    if (model) {
-        return model;
-    }
-
-    if (typeof tmImage === "undefined") {
-        throw new Error(
-            "Teachable Machine library did not load. " +
-            "Check your internet connection and script tags."
-        );
-    }
-
-    const modelPath = MODEL_URL + "model.json";
-    const metadataPath = MODEL_URL + "metadata.json";
-
-    setStatus("Loading the FloraLens AI model...");
-
-    model = await tmImage.load(modelPath, metadataPath);
-
-    console.log(
-        "FloraLens model loaded.",
-        model.getClassLabels()
-    );
-
-    return model;
-}
-
-/* =========================================
-   START SCANNER
-   ========================================= */
-
-async function startScanner() {
-    if (isRunning || isStarting) {
-        return;
-    }
-
-    isStarting = true;
-
-    if (startButton) startButton.disabled = true;
-    if (stopButton) stopButton.disabled = true;
+// Find the strongest prediction and require stable frames.
+async function processPredictions() {
+    if (!isRunning || !model || !webcam) return;
 
     try {
-        if (!navigator.mediaDevices ||
-            !navigator.mediaDevices.getUserMedia) {
+        await webcam.update();
+
+        const predictions = await model.predict(webcam.canvas);
+
+        if (!isRunning) return;
+
+        updatePredictions(predictions);
+
+        const bestPrediction = predictions.reduce(
+            (best, current) =>
+                current.probability > best.probability
+                    ? current
+                    : best,
+            predictions[0]
+        );
+
+        if (!bestPrediction) {
+            setStatus("Waiting for a prediction...");
+            return;
+        }
+
+        const predictedInfo = getClassInfo(bestPrediction.className);
+
+        console.debug("FloraLens prediction:", {
+            modelClass: bestPrediction.className,
+            matchedClass: predictedInfo
+                ? predictedInfo.name
+                : "NO MATCH",
+            confidence: (
+                bestPrediction.probability * 100
+            ).toFixed(2) + "%"
+        });
+
+        // Require the prediction to meet the confidence threshold.
+        if (bestPrediction.probability < CONFIDENCE_THRESHOLD) {
+            stableLabel = "";
+            stableFrames = 0;
+
+            setStatus("Plant not recognized confidently. Try moving closer.");
+
+            if (confidenceInfo) {
+                confidenceInfo.textContent =
+                    `Best confidence: ${(bestPrediction.probability * 100).toFixed(1)}%`;
+            }
+
+            animationFrame = requestAnimationFrame(processPredictions);
+            return;
+        }
+
+        const currentKey = normaliseLabel(bestPrediction.className);
+
+        // Reset the counter whenever the predicted class changes.
+        if (currentKey === stableLabel) {
+            stableFrames++;
+        } else {
+            stableLabel = currentKey;
+            stableFrames = 1;
+        }
+
+        setStatus(
+            `Analyzing ${bestPrediction.className}... ` +
+            `(${Math.min(stableFrames, REQUIRED_STABLE_FRAMES)}/${REQUIRED_STABLE_FRAMES})`
+        );
+
+        if (stableFrames >= REQUIRED_STABLE_FRAMES) {
+            if (predictedInfo) {
+                displayResult(
+                    bestPrediction.className,
+                    bestPrediction.probability
+                );
+
+                setStatus(`${predictedInfo.name} recognized successfully.`);
+            } else {
+                // Do not falsely display an unknown class as a known plant.
+                if (resultElement) {
+                    resultElement.textContent = "Unknown Class";
+                }
+
+                if (detailsElement) {
+                    detailsElement.textContent =
+                        `The model predicted "${bestPrediction.className}", ` +
+                        "but this class has no matching information in FloraLens.";
+                }
+
+                setStatus("Model class needs to be configured.");
+            }
+        }
+
+    } catch (error) {
+        console.error("Prediction error:", error);
+        setStatus("Prediction error. Please restart the scanner.");
+    }
+
+    if (isRunning) {
+        animationFrame = requestAnimationFrame(processPredictions);
+    }
+}
+
+// Start the camera and load the model.
+async function startScanner() {
+    if (isRunning || isLoading) return;
+
+    isLoading = true;
+
+    if (startBtn) startBtn.disabled = true;
+
+    setStatus("Loading FloraLens AI model...");
+
+    try {
+        if (
+            typeof tmImage === "undefined" ||
+            !tmImage.Webcam ||
+            !tmImage.load
+        ) {
             throw new Error(
-                "Camera access is unavailable. Open FloraLens " +
-                "through localhost or a secure HTTPS website."
+                "Teachable Machine library not loaded. Check scanner.html script tags."
             );
         }
 
-        await loadModel();
+        const modelURL = MODEL_URL + "model.json";
+        const metadataURL = MODEL_URL + "metadata.json";
 
-        setStatus("Starting your camera...");
+        model = await tmImage.load(modelURL, metadataURL);
 
         webcam = new tmImage.Webcam(
             CAMERA_WIDTH,
@@ -521,160 +401,122 @@ async function startScanner() {
         await webcam.setup();
         await webcam.play();
 
-        if (cameraElement) {
-            cameraElement.replaceChildren(webcam.canvas);
+        if (!camera) {
+            throw new Error('Canvas element with ID "camera" was not found.');
         }
+
+        camera.width = CAMERA_WIDTH;
+        camera.height = CAMERA_HEIGHT;
 
         isRunning = true;
 
-        resetStableDetection();
+        if (startBtn) startBtn.disabled = true;
+        if (stopBtn) stopBtn.disabled = false;
+
+        setStatus("Camera ready. Point it at a plant or weed.");
+
+        if (resultElement) {
+            resultElement.textContent = "Waiting for a plant...";
+        }
+
+        if (detailsElement) {
+            detailsElement.textContent =
+                "Keep the plant centered and ensure it is well lit.";
+        }
+
+        if (confidenceInfo) {
+            confidenceInfo.textContent =
+                "Waiting for prediction...";
+        }
+
         lastDisplayedLabel = "";
-        lastSpokenLabel = "";
+        stableLabel = "";
+        stableFrames = 0;
 
-        if (startButton) startButton.disabled = true;
-        if (stopButton) stopButton.disabled = false;
+        processPredictions();
 
-        setStatus("Camera started. Point it at a plant.");
-
-        animationFrameId = requestAnimationFrame(scanLoop);
     } catch (error) {
-        console.error("FloraLens scanner error:", error);
+        console.error("Unable to start FloraLens:", error);
 
         setStatus(
-            "Could not start the scanner: " +
-            (error.message || "Unknown error") +
-            " Please check camera permission and model access."
+            "Could not start the scanner. Allow camera access and try again."
         );
+
+        if (startBtn) startBtn.disabled = false;
+        if (stopBtn) stopBtn.disabled = true;
 
         if (webcam) {
             try {
                 webcam.stop();
             } catch (stopError) {
-                console.warn(stopError);
+                console.warn("Camera cleanup issue:", stopError);
             }
         }
 
         webcam = null;
+        model = null;
         isRunning = false;
 
-        if (startButton) startButton.disabled = false;
-        if (stopButton) stopButton.disabled = true;
     } finally {
-        isStarting = false;
+        isLoading = false;
     }
 }
 
-/* =========================================
-   SCANNER LOOP
-   ========================================= */
-
-async function scanLoop() {
-    if (!isRunning || !webcam || !model) {
-        return;
-    }
-
-    try {
-        webcam.update();
-
-        const predictions = await model.predict(webcam.canvas);
-
-        if (!isRunning) {
-            return;
-        }
-
-        processPredictions(predictions);
-    } catch (error) {
-        console.error("FloraLens prediction error:", error);
-
-        setStatus(
-            "An error occurred during recognition. Check the console."
-        );
-    }
-
-    if (isRunning) {
-        animationFrameId = requestAnimationFrame(scanLoop);
-    }
-}
-
-/* =========================================
-   STOP SCANNER
-   ========================================= */
-
+// Stop the camera and prediction loop.
 function stopScanner() {
     isRunning = false;
 
-    if (animationFrameId !== null) {
-        cancelAnimationFrame(animationFrameId);
-        animationFrameId = null;
+    if (animationFrame !== null) {
+        cancelAnimationFrame(animationFrame);
+        animationFrame = null;
     }
 
     if (webcam) {
         try {
             webcam.stop();
         } catch (error) {
-            console.warn("Could not stop webcam cleanly:", error);
+            console.warn("Camera stop issue:", error);
         }
-
-        webcam = null;
     }
 
-    if (cameraElement) {
-        cameraElement.replaceChildren();
+    webcam = null;
+
+    stopSpeech();
+
+    if (startBtn) startBtn.disabled = false;
+    if (stopBtn) stopBtn.disabled = true;
+
+    setStatus("Scanner stopped. Press Start Scanner to scan again.");
+}
+
+// Toggle voice output.
+function toggleVoice() {
+    voiceEnabled = !voiceEnabled;
+
+    updateVoiceButton();
+
+    if (!voiceEnabled) {
+        stopSpeech();
+        setStatus("Voice output is off.");
+    } else {
+        setStatus("Voice output is on.");
     }
-
-    resetStableDetection();
-
-    if (startButton) startButton.disabled = false;
-    if (stopButton) stopButton.disabled = true;
-
-    setStatus("Scanner stopped. Start again when you're ready.");
 }
 
-/* =========================================
-   EVENT LISTENERS
-   ========================================= */
-
-if (startButton) {
-    startButton.addEventListener("click", startScanner);
+// Connect the page buttons.
+if (startBtn) {
+    startBtn.addEventListener("click", startScanner);
 }
 
-if (stopButton) {
-    stopButton.addEventListener("click", stopScanner);
+if (stopBtn) {
+    stopBtn.addEventListener("click", stopScanner);
+    stopBtn.disabled = true;
 }
 
-if (voiceButton) {
-    voiceButton.addEventListener("click", () => {
-        voiceEnabled = !voiceEnabled;
-
-        if (!voiceEnabled && "speechSynthesis" in window) {
-            window.speechSynthesis.cancel();
-        }
-
-        updateVoiceButton();
-
-        if (voiceEnabled && lastDisplayedLabel) {
-            // Allow the current plant to be spoken again.
-            lastSpokenLabel = "";
-            speakResult(lastDisplayedLabel);
-        }
-    });
+if (voiceBtn) {
+    voiceBtn.addEventListener("click", toggleVoice);
 }
-
-/* =========================================
-   INITIALIZE FLORALENS
-   ========================================= */
 
 updateVoiceButton();
 
-if (resultElement) {
-    resultElement.textContent = "Waiting for a plant...";
-}
-
-if (detailsElement) {
-    detailsElement.textContent =
-        "Start the scanner to identify a plant.";
-}
-
-setStatus("Ready. Start the scanner to load the AI model.");
-
-console.log("FloraLens scanner initialized.");
+console.log("FloraLens scanner.js loaded successfully.");
